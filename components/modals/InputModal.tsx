@@ -31,7 +31,7 @@ export const InputModal: React.FC<InputModalProps> = ({ onClose, editEntry }) =>
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
 
   const offDays = useMemo(() => StorageService.getOffDays(), []);
-  const currentOffDay = useMemo(() => offDays.find(od => od.date === date), [date, offDays]);
+  const currentOffDay = useMemo(() => offDays.find(od => od.date.trim().substring(0, 10) === date.trim().substring(0, 10)), [date, offDays]);
 
   const inputClasses = "w-full p-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-bold focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all shadow-sm";
 
@@ -45,14 +45,16 @@ export const InputModal: React.FC<InputModalProps> = ({ onClose, editEntry }) =>
 
   useEffect(() => {
     if (editEntry) {
-      setDate(editEntry.date);
+      setDate(editEntry.date.trim().substring(0, 10));
       setCategory(editEntry.category);
       setProcess(editEntry.process);
       setProductName(editEntry.productName);
-      setQuantity(editEntry.planQuantity.toString());
+      // Determine which quantity to show in the single input field based on the mode
+      const isActualMode = editEntry.actualQuantity > 0;
+      setQuantity(isActualMode ? editEntry.actualQuantity.toString() : editEntry.planQuantity.toString());
       setManpower(editEntry.manpower?.toString() || '0');
       setBatchNo(editEntry.batchNo || '');
-      setTab(editEntry.actualQuantity > 0 ? 'Actual' : 'Plan'); 
+      setTab(isActualMode ? 'Actual' : 'Plan'); 
     } else {
       if (user?.role === 'operator') setTab('Actual');
       else if (user?.role === 'planner') setTab('Plan');
@@ -62,7 +64,8 @@ export const InputModal: React.FC<InputModalProps> = ({ onClose, editEntry }) =>
   useEffect(() => {
     if (tab === 'Actual' && !editEntry) {
         const all = StorageService.getProductionData();
-        const relevant = all.filter(p => p.date === date);
+        const normalizedInputDate = date.trim().substring(0, 10);
+        const relevant = all.filter(p => p.date.trim().substring(0, 10) === normalizedInputDate);
         setPlans(relevant);
         setSelectedPlanId('');
     }
@@ -72,8 +75,8 @@ export const InputModal: React.FC<InputModalProps> = ({ onClose, editEntry }) =>
     e.preventDefault();
     setIsSubmitting(true);
     
-    // Safety: Strip any time info and just keep YYYY-MM-DD
-    const normalizedDate = date.split('T')[0];
+    // Strict normalization to YYYY-MM-DD
+    const normalizedDate = date.trim().split('T')[0].substring(0, 10);
 
     if (!editEntry && currentOffDay) {
         window.dispatchEvent(new CustomEvent('app-notification', { 
@@ -87,26 +90,52 @@ export const InputModal: React.FC<InputModalProps> = ({ onClose, editEntry }) =>
 
     try {
         if (editEntry) {
+            // Track what changed for the log
+            const changes: string[] = [];
+            const newQty = parseInt(quantity);
+            const newManpower = parseInt(manpower);
+
+            if (editEntry.date !== normalizedDate) changes.push(`Date (${editEntry.date} → ${normalizedDate})`);
+            if (editEntry.productName !== productName) changes.push(`Product (${editEntry.productName} → ${productName})`);
+            if (editEntry.category !== category) changes.push(`Category (${editEntry.category} → ${category})`);
+            if (editEntry.process !== process) changes.push(`Process (${editEntry.process} → ${process})`);
+            
+            if (tab === 'Plan') {
+              if (editEntry.planQuantity !== newQty) changes.push(`Plan Qty (${editEntry.planQuantity} → ${newQty})`);
+            } else {
+              if (editEntry.actualQuantity !== newQty) changes.push(`Actual Qty (${editEntry.actualQuantity} → ${newQty})`);
+            }
+
+            if ((editEntry.manpower || 0) !== newManpower) changes.push(`Manpower (${editEntry.manpower || 0} → ${newManpower})`);
+            if ((editEntry.batchNo || '') !== batchNo) changes.push(`Batch (${editEntry.batchNo || 'None'} → ${batchNo || 'None'})`);
+
             const updated = currentData.map(p => {
                 if (p.id === editEntry.id) {
                     return { 
                         ...p, 
                         date: normalizedDate, 
                         category, process, productName,
-                        planQuantity: tab === 'Plan' ? parseInt(quantity) : p.planQuantity,
-                        actualQuantity: tab === 'Actual' ? parseInt(quantity) : p.actualQuantity,
-                        batchNo, manpower: parseInt(manpower),
+                        planQuantity: tab === 'Plan' ? newQty : p.planQuantity,
+                        actualQuantity: tab === 'Actual' ? newQty : p.actualQuantity,
+                        batchNo, manpower: newManpower,
                         lastUpdatedBy: user!.id, updatedAt: new Date().toISOString()
                     };
                 }
                 return p;
             });
+
             StorageService.saveProductionData(updated);
+            
+            // Build Contextual Log Details: "Edited Product (Process) on Date: Changes"
+            const logDetails = changes.length > 0 
+              ? `Edited ${productName} (${editEntry.process}) on ${editEntry.date}: ${changes.join(', ')}`
+              : `Updated record for ${productName} (${editEntry.process}) on ${editEntry.date} (No values changed)`;
+
             StorageService.addLog({
               userId: user!.id,
               userName: user!.name,
               action: 'EDIT_RECORD',
-              details: `Edited ${productName} on ${normalizedDate}`
+              details: logDetails
             });
         } else {
             if (tab === 'Plan') {
@@ -118,8 +147,15 @@ export const InputModal: React.FC<InputModalProps> = ({ onClose, editEntry }) =>
                     lastUpdatedBy: user!.id, updatedAt: new Date().toISOString()
                 };
                 StorageService.saveProductionData([...currentData, newEntry]);
+                StorageService.addLog({
+                  userId: user!.id,
+                  userName: user!.name,
+                  action: 'CREATE_PLAN',
+                  details: `Planned ${newEntry.planQuantity} units for ${newEntry.productName} (${normalizedDate})`
+                });
             } else {
                 if (!selectedPlanId) throw new Error("Please select a plan");
+                const targetPlan = currentData.find(p => p.id === selectedPlanId);
                 const updated = currentData.map(p => {
                     if (p.id === selectedPlanId) {
                         return { 
@@ -131,6 +167,12 @@ export const InputModal: React.FC<InputModalProps> = ({ onClose, editEntry }) =>
                     return p;
                 });
                 StorageService.saveProductionData(updated);
+                StorageService.addLog({
+                  userId: user!.id,
+                  userName: user!.name,
+                  action: 'RECORD_ACTUAL',
+                  details: `Recorded actual output of ${quantity} units for ${targetPlan?.productName || 'product'}`
+                });
             }
         }
 
